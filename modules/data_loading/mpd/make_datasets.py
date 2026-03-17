@@ -169,4 +169,4 @@ def make_mpd_loaders(
         pin_memory=pin_memory,
     )
 
-    return train_loader, val_loader, test_loader, vocab
+    return train_loader, val_loader, test_loader, vocab, train_sequences
