@@ -1,0 +1,120 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+% The preceding line is only needed to identify funding in the first footnote. If that is unneeded, please comment it out.
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\begin{document}
+
+\title{Optimizing for Sequential Coherence and Playlist Coherence in Automatic Playlist Continuation}
+
+\author{\IEEEauthorblockN{James Williams}
+\IEEEauthorblockA{\textit{Whiting School of Engineering} \\
+\textit{Johns Hopkins University}\\
+Philadelphia, United States of America \\
+jwill436@jh.edu}
+}
+\maketitle
+
+\begin{abstract}
+Automatic Playlist Continuation is naturally modeled as a sequence-to-sequence supervised learning task, and systems are commonly evaluated on metrics such as R-Precision and nDCG. These metrics account for the relevance of retrieved tracks, but they do not directly account for \textit{coherence}, or the degree to which a playlist forms a musically and sequentially consistent listening experience. This paper investigates whether explicitly modeling and optimizing playlist coherence improves the quality of automatic playlist continuation, and analyzes the trade-off between traditional ranking accuracy and sequential coherence.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Automatic Playlist Continuation, Decode-Only Transformers, Sequence-To-Sequence Modeling
+\end{IEEEkeywords}
+
+\section{Introduction}
+Skilled disc jockeys are able to effectively adapt to variable crowd moods and responses through their choice and sequencing of tracks. Amateur disc jockeys merely curate playlists ahead of time, providing an experience no different than turning on the radio.
+
+Automatic Playlist Continuation systems ingest data about playlists at the track level and recommend new tracks to append to the playlist. These systems are typically optimized for metrics like R-Precision and nDCG [3]. These metrics emphasize the "correctness" of predicted tracks based on the training data, but do not encode the "coherence" of the sequential listening experience provided by the new track, which can be "vaguely defined as smooth transitions between tracks" [2]. 
+
+Large public datasets of real playlists are freely available for research purposes, such as the Million Playlist Dataset (MPD) [5], consisting of 1,000,000 playlists from the Spotify music streaming service. The MPD includes complete per-track metadata for album, artist, and length, but does not include data such as genre, or any audio-derived features such as average loudness.
+
+\section{Related Work}
+
+Schweiger et al. [1] observationally show that sequential variance in audio features and metadata between tracks in real playlists are meaningfully lower than variance in nonadjacent tracks, suggesting that sequentially-aware approaches should perform better than global approaches.
+
+Schweiger et al. [2] provide stable definitions of playlist coherence based on audio features, and demonstrate that coherence increases with playlist length and so normalization is critical.
+
+Bendada et al. [3] evaluate different algorithms for learning playlist representations solely from embeddings of songs and demonstrate that transformers achieve the largest precision, recall, R-precision, and nDCG among trialed methods.
+
+Bendada et al. [4] describe a decoder-only architecture used in production for a real music streaming service.
+
+Chen et al. [5] provide the Million Playlist Dataset (MPD), consisting of 1,000,000 playlists from the Spotify platform. These playlists were created between January 2010 and October 2017, and each playlist contains playlist metadata such as a title and an edit history, as well as individual track data, principally the track name and the position of the track in the playlist.
+
+\section{Research Project Problem}
+
+This paper investigates the effects of incorporating a coherence metric as track similarity based on playlist co-occurrence statistics into the model training loss on prediction accuracy metrics.
+
+\section{Method}
+
+A playlist is an ordered sequence of tracks $P = (t_1, t_2, ..., t_n)$ where each $t_i$ is drawn from the relevant universe of tracks $T$. The playlist continuation task is to learn a model that estimates the conditional probability $p(t_{i+1} \mid (t_1, t_2, ..., t_i)$ for all valid $i$.
+
+\subsection{Data}
+
+This paper employs the MPD described in sections I and II. Only the track order information and unique track identifiers are retained for all analyses. While previous work such as [1] and [2] were able to employ the Spotify API to obtain more detailed per-track features, this author was unable to utilize this API.
+
+The dataset is split deterministically into training, validation, and testing sets by the playlist identifier, where playlists shorter than a minimum threshold are removed and sequences are possibly truncated to a maximum length less than their true maximum length for training efficiency.
+
+Special tokens for beginning-of-sequence, end-of-sequence, unknown track, and padding are injected into each sequence for ease of modeling. 
+
+Each playlist is converted into a series of training examples $(t_1, t_2, ..., t_{n-1}), (t_2, t_3, ..., t_n)$, with the model predicting the latter based on the former.
+
+All data retrieval and preprocessing are performed in a streaming manner for efficiency.
+
+\subsection{Model}
+
+Following [4], this paper implements a decoder-only transformer language model. Each track token is mapped to a learned embedding vector, with positional embeddings injected to preserve order. This resulting representation is then passed through a stack of transformer blocks which employ causal masking, ensuring that predictions only depend on previous tracks.
+
+The final model outputs are de-embedded back into $T$ to produce logits for each track. 
+
+The baseline loss employed is cross-entropy loss.
+
+\subsection{Coherence}
+
+This paper introduces a track similarity metric based on playlist co-occurrence in order to proxy for more detailed per-track features. Intuitively, tracks which co-occur more often should be more similar than tracks which co-occur less often. This similarity metric differs from previous works, but is dependent on fewer features.
+
+Track similarity is defined as follows: $similarity(i, j) = \frac{co-occurrence(i, j)}{\sqrt{occurrence(i)occurrence(j)}}$. This assigns higher similarity to tracks which frequency co-occur. To improve training efficiency, a dense similarity matrix is precomputed.
+
+For a sequentially-aware approach, we are only concerned with the similarity of the last track in the training example and the prediction. For completeness this paper also investigates the average similarity of the prediction to every track in the training example. These two metrics into overall coherence $C$ using a weighted sum, and are normalized.
+
+To incorporate this into model loss, let the expected coherence $E[C] = \sum_{tracks}p(track)C(track)$. Maximizing this value encourages coherent predictions, so loss must take $-E[C]$. The final loss then combines cross-entropy with this coherence term, controlled with a regularization hyperparameter.
+
+\section{Experiments}
+
+This is a placeholder section which will be completed later. Please see the provided Jupyter notebook.
+
+\section{Discussion}
+
+This is a placeholder section which will be completed later.
+
+\section{Conclusion}
+
+This is a placeholder section which will be completed later.
+
+\begin{thebibliography}{00}
+\bibitem{b1} H. Schweiger, E. Parada-Cabaleiro, and M.
+Schedl, “Does Track Sequence in User-generated Playlists Matter?”, in
+Proc. of the 22nd Int. Society for Music Information Retrieval Conf.,
+Online, 2021.
+\bibitem{b2} Schweiger, H., Parada-Cabaleiro, E. \& Schedl, M. The impact of playlist characteristics on coherence in user-curated music playlists. EPJ Data Sci. 14, 24 (2025). https://doi.org/10.1140/epjds/s13688-025-00531-3
+\bibitem{b3} Walid Bendada, Guillaume Salha-Galvan, Thomas Bouabça, and Tristan
+Cazenave. 2023. A Scalable Framework for Automatic Playlist Continuation
+on Music Streaming Services. In Proceedings of the 46th International ACM
+SIGIR Conference on Research and Development in Information Retrieval
+(SIGIR ’23), July 23–27, 2023, Taipei, Taiwan. ACM, New York, NY, USA,
+11 pages. https://doi.org/10.1145/3539618.3591628
+\bibitem{b4} Walid Bendada, Théo Bontempelli, Mathieu Morlon, Benjamin Chapus, Thibault Cador, Thomas Bouabça, and Guillaume Salha-Galvan.
+2023. Track Mix Generation on Music Streaming Services using Transformers. In Seventeenth ACM Conference on Recommender Systems
+(RecSys ’23), September 18–22, 2023, Singapore. ACM, New York, NY, USA, 5 pages. https://doi.org/TBD.
+\bibitem{b5} C.W. Chen, P. Lamere, M. Schedl, and H. Zamani. Recsys Challenge 2018: Automatic Music Playlist Continuation. In Proceedings of the 12th ACM Conference on Recommender Systems (RecSys ’18), 2018.
+
+\end{thebibliography}
+
+\end{document}
