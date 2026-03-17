@@ -7,6 +7,7 @@
 \usepackage{graphicx}
 \usepackage{textcomp}
 \usepackage{xcolor}
+\usepackage{url}
 \def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
     T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
 \begin{document}
@@ -55,6 +56,8 @@ This paper investigates the effects of incorporating a coherence metric as track
 \section{Method}
 
 A playlist is an ordered sequence of tracks $P = (t_1, t_2, ..., t_n)$ where each $t_i$ is drawn from the relevant universe of tracks $T$. The playlist continuation task is to learn a model that estimates the conditional probability $p(t_{i+1} \mid (t_1, t_2, ..., t_i)$ for all valid $i$.
+
+All code is available at the following public github repository: \url{https://github.com/JamesCWilliams/Coherent_Automatic_Playlist_Continuation}.
 
 \subsection{Data}
 

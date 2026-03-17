@@ -1,7 +1,7 @@
 # Fdb version 4
-["pdflatex"] 1773717085.33597 "/home/james/code/advanced_applied_machine_learning/final_project/reports/midpoint_check/draft_paper.tex" "draft_paper.pdf" "draft_paper" 1773717085.54559 0
+["pdflatex"] 1773717681.76526 "/home/james/code/advanced_applied_machine_learning/final_project/reports/midpoint_check/draft_paper.tex" "draft_paper.pdf" "draft_paper" 1773717682.01792 0
   "/etc/texmf/web2c/texmf.cnf" 1759345950.29953 475 c0e671620eb5563b2130f56340a5fde8 ""
-  "/home/james/code/advanced_applied_machine_learning/final_project/reports/midpoint_check/draft_paper.tex" 1773717080.72103 9146 01b77a19ecce1a7046d01daa65c5ae99 ""
+  "/home/james/code/advanced_applied_machine_learning/final_project/reports/midpoint_check/draft_paper.tex" 1773717681.62255 9311 cc0bdd974c3a5f3b82184ea4b4bcc98a ""
   "/usr/share/texlive/texmf-dist/fonts/enc/dvips/base/8r.enc" 1165713224 4850 80dc9bab7f31fb78a000ccfed0e27cab ""
   "/usr/share/texlive/texmf-dist/fonts/map/fontname/texfonts.map" 1577235249 3524 cb3e574dea2d1052e39280babc910dc8 ""
   "/usr/share/texlive/texmf-dist/fonts/tfm/adobe/times/ptmb7t.tfm" 1136768653 2172 fd0c924230362ff848a33632ed45dc23 ""
@@ -63,13 +63,14 @@
   "/usr/share/texlive/texmf-dist/tex/latex/l3backend/l3backend-pdftex.def" 1704491087 30006 57b07afb710ee2f649c65cfbafda39c1 ""
   "/usr/share/texlive/texmf-dist/tex/latex/latexconfig/epstopdf-sys.cfg" 1279039959 678 4792914a8f45be57bb98413425e4c7af ""
   "/usr/share/texlive/texmf-dist/tex/latex/psnfss/ot1ptm.fd" 1137110629 961 15056f4a61917ceed3a44e4ac11fcc52 ""
+  "/usr/share/texlive/texmf-dist/tex/latex/url/url.sty" 1388531844 12796 8edb7d69a20b857904dd0ea757c14ec9 ""
   "/usr/share/texlive/texmf-dist/tex/latex/xcolor/xcolor.sty" 1700082560 55487 80a65caedd3722f4c20a14a69e785d8f ""
   "/usr/share/texlive/texmf-dist/web2c/texmf.cnf" 1707919699 40399 f2c302f7d2af602abb742093540a5834 ""
   "/usr/share/texmf/web2c/texmf.cnf" 1707919699 40399 f2c302f7d2af602abb742093540a5834 ""
   "/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map" 1759349210.26196 5472669 54eaf61a88b6b7896ebd0dac973cb29c ""
   "/var/lib/texmf/web2c/pdftex/pdflatex.fmt" 1759349251 8215194 3d29a4c69e13e4efb4c63521ae5a0a57 ""
-  "draft_paper.aux" 1773717085.52145 1230 5818923bb4035079c1064d08082e71cb "pdflatex"
-  "draft_paper.tex" 1773717080.72103 9146 01b77a19ecce1a7046d01daa65c5ae99 ""
+  "draft_paper.aux" 1773717681.98855 1230 5818923bb4035079c1064d08082e71cb "pdflatex"
+  "draft_paper.tex" 1773717681.62255 9311 cc0bdd974c3a5f3b82184ea4b4bcc98a ""
   (generated)
   "draft_paper.aux"
   "draft_paper.log"
