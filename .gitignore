@@ -3,3 +3,4 @@ venv
 logs
 __init__.py
 __pycache__
+saved_models
