@@ -1,34 +1,16 @@
-"""
-Convenience layer for making JSON logs.
-"""
-
-
 from datetime import datetime
 import json
 from pathlib import Path
 
 
-def log(
-        payload: dict,
-        subdir_name: str,
-        log_dir: Path | None = None
-):
-    """
-    Make sure the directory exists for logging.
-    """
-
+def log(payload: dict, subdir_name: str, log_dir: Path | None = None):
     if log_dir is None:
-        here = Path.cwd()
-        log_dir = here / 'logs'
+        log_dir = Path.cwd() / 'logs'
 
-    current_datetime = datetime.now()
-    current_date = current_datetime.date()
-    current_time = current_datetime.time()
+    now = datetime.now()
+    this_dir = log_dir / subdir_name / now.strftime(r'%Y-%m-%d')
+    this_dir.mkdir(parents=True, exist_ok=True)
 
-    this_dir = log_dir / subdir_name / current_date.strftime(r'%Y-%m-%d')
-    if not this_dir.exists():
-        this_dir.mkdir(parents=True, exist_ok=True)
-
-    file_name = this_dir / f"{current_time.strftime('%H%M%S')}.json"
+    file_name = this_dir / f"{now.strftime('%H%M%S')}.json"
     with open(file_name, 'w', encoding='utf-8') as f:
         json.dump(payload, f, indent=4)

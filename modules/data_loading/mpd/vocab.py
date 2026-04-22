@@ -14,9 +14,6 @@ class TrackVocab:
             unk_idx: int,
             msk_idx: int
     ):
-        """
-        Helper for tokenization.
-        """
         self.str_to_idx = str_to_idx
         self.idx_to_str = idx_to_str
         self.pad_idx = pad_idx
@@ -27,37 +24,31 @@ class TrackVocab:
 
     def __len__(self):
         return len(self.idx_to_str)
-    
+
     def encode_token(self, token: str) -> int:
         return self.str_to_idx.get(token, self.unk_idx)
-    
+
     def decode_token(self, idx: int) -> str:
         return self.idx_to_str[idx]
 
 
-def build_track_vocab(
-        config: MPDConfig,
-        playlists
-) -> TrackVocab:
-    """
-    Build vocabulary from tracks if track_uri is present more than some threshold.
-    """
-
+def build_track_vocab(config: MPDConfig, playlists) -> TrackVocab:
     counter = Counter()
     for playlist in tqdm(playlists):
         seq = playlist_to_track_sequence(playlist)
         counter.update(seq)
-    
+
     specials = [
         config.pad_token,
         config.bos_token,
         config.eos_token,
         config.unk_token,
-        config.msk_token
+        config.msk_token,
     ]
 
-    track_tokens = [track_uri for track_uri, freq in counter.items() if freq >= config.min_track_freq]
-    track_tokens.sort()
+    track_tokens = sorted(
+        uri for uri, freq in counter.items() if freq >= config.min_track_freq
+    )
 
     idx_to_str = specials + track_tokens
     str_to_idx = {tok: i for i, tok in enumerate(idx_to_str)}
@@ -69,5 +60,5 @@ def build_track_vocab(
         bos_idx=str_to_idx[config.bos_token],
         eos_idx=str_to_idx[config.eos_token],
         unk_idx=str_to_idx[config.unk_token],
-        msk_idx=str_to_idx[config.msk_token]
+        msk_idx=str_to_idx[config.msk_token],
     )

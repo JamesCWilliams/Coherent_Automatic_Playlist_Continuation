@@ -6,9 +6,6 @@ from typing import Iterator
 
 @dataclass
 class MPDConfig:
-    """
-    Container class for reading the Spotify Million Playlist Dataset.
-    """
     data_dir: Path | None = None
     min_track_freq: int = 2
     max_seq_len: int = 128
@@ -25,26 +22,13 @@ class MPDConfig:
     seed: int = 10
 
 
-def iter_mpd_slice_files(
-        data_dir: Path | None = None
-) -> Iterator[Path]:
-    """
-    Dataset is huge; get slices on-demand (paths).
-    """
-
+def iter_mpd_slice_files(data_dir: Path | None = None) -> Iterator[Path]:
     if data_dir is None:
         data_dir = Path.cwd() / 'datasets' / 'MPD' / 'data'
-
     yield from sorted(data_dir.glob('*.json'))
 
 
-def iter_playlists(
-        data_dir: Path | None = None
-) -> Iterator[dict]:
-    """
-    Dataset is huge; get slices on-demand (playlists)
-    """
-
+def iter_playlists(data_dir: Path | None = None) -> Iterator[dict]:
     if data_dir is None:
         data_dir = Path.cwd() / 'datasets' / 'MPD' / 'data'
 
@@ -54,13 +38,6 @@ def iter_playlists(
         yield from obj.get('playlists', [])
 
 
-def playlist_to_track_sequence(
-        playlist: dict
-) -> list[str]:
-    """
-    Convert one playlist dict per iter_playlists() into an ordered list of track_uri tokens.
-    """
-
+def playlist_to_track_sequence(playlist: dict) -> list[str]:
     tracks = sorted(playlist.get('tracks', []), key=lambda x: x.get('pos', 0))
-    seq = [track['track_uri'] for track in tracks if 'track_uri' in track]
-    return seq
+    return [track['track_uri'] for track in tracks if 'track_uri' in track]

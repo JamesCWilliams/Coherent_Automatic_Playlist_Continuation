@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -14,29 +13,17 @@ class ModelConfig:
     d_ff: int = 1024
     dropout: float = 0.1
     max_seq_len: int = 128
-
     pad_idx: int = 0
-    bos_idx: Optional[int] = 1
-
     tie_weights: bool = True
 
 
 class PosEmbedding(nn.Module):
 
-    def __init__(
-        self,
-        max_seq_len: int,
-        d_model: int,
-    ):
-        
+    def __init__(self, max_seq_len: int, d_model: int):
         super().__init__()
         self.embedding = nn.Embedding(max_seq_len, d_model)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len = input_ids.shape
         positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
         positions = positions.expand(batch_size, seq_len)
@@ -45,16 +32,8 @@ class PosEmbedding(nn.Module):
 
 class CausalTransformerBlock(nn.Module):
 
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        d_ff: int,
-        dropout: float,
-    ):
-        
+    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float):
         super().__init__()
-
         self.ln1 = nn.LayerNorm(d_model)
         self.attn = nn.MultiheadAttention(
             embed_dim=d_model,
@@ -62,7 +41,6 @@ class CausalTransformerBlock(nn.Module):
             dropout=dropout,
             batch_first=True,
         )
-
         self.ln2 = nn.LayerNorm(d_model)
         self.ff = nn.Sequential(
             nn.Linear(d_model, d_ff),
@@ -76,14 +54,11 @@ class CausalTransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         causal_mask: torch.Tensor,
-        key_padding_mask: Optional[torch.Tensor] = None,
+        key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        
         h = self.ln1(x)
         attn_out, _ = self.attn(
-            h,
-            h,
-            h,
+            h, h, h,
             attn_mask=causal_mask,
             key_padding_mask=key_padding_mask,
             need_weights=False,
@@ -95,11 +70,7 @@ class CausalTransformerBlock(nn.Module):
 
 class DecodeOnlyTransformer(nn.Module):
 
-    def __init__(
-        self,
-        config: ModelConfig,
-    ):
-        
+    def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
 
@@ -127,12 +98,7 @@ class DecodeOnlyTransformer(nn.Module):
         if config.tie_weights:
             self.lm_head.weight = self.track_embedding.weight
 
-    def make_causal_mask(
-        self,
-        seq_len: int,
-        device: torch.device,
-    ) -> torch.Tensor:
-
+    def make_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         return torch.triu(
             torch.ones(seq_len, seq_len, device=device, dtype=torch.bool),
             diagonal=1,
@@ -141,9 +107,8 @@ class DecodeOnlyTransformer(nn.Module):
     def encode_tokens(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        
         batch_size, seq_len = input_ids.shape
 
         if seq_len > self.config.max_seq_len:
@@ -153,7 +118,6 @@ class DecodeOnlyTransformer(nn.Module):
 
         x = self.track_embedding(input_ids) + self.pos_embedding(input_ids)
         x = self.input_dropout(x)
-
         causal_mask = self.make_causal_mask(seq_len, input_ids.device)
 
         if attention_mask is None:
@@ -162,22 +126,13 @@ class DecodeOnlyTransformer(nn.Module):
             key_padding_mask = (attention_mask == 0)
 
         for block in self.blocks:
-            x = block(
-                x,
-                causal_mask=causal_mask,
-                key_padding_mask=key_padding_mask,
-            )
+            x = block(x, causal_mask=causal_mask, key_padding_mask=key_padding_mask)
 
-        x = self.final_ln(x)
-        return x
+        return self.final_ln(x)
 
     def forward(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        
-        hidden_states = self.encode_tokens(input_ids, attention_mask)
-        logits = self.lm_head(hidden_states)
-        return logits
-    
+        return self.lm_head(self.encode_tokens(input_ids, attention_mask))

@@ -11,10 +11,6 @@ def next_track_collate_fn(
         batch: list[dict[str, torch.Tensor]],
         pad_idx: int
 ) -> dict[str, torch.Tensor]:
-    """
-    Sequences are of variable length, pad them so they are the same length.
-    """
-
     batch_size = len(batch)
     max_len = max(item['input_ids'].size(0) for item in batch)
 
@@ -31,22 +27,11 @@ def next_track_collate_fn(
     return {
         'input_ids': input_ids,
         'labels': labels,
-        'attention_mask': mask
+        'attention_mask': mask,
     }
 
 
-def truncate_for_testing(
-        items,
-        max_items
-):
-    return items[:max_items] if max_items else items
-
-
-def _assign_split_from_pid(
-    pid: int,
-    train_frac: float
-) -> str:
-    
+def _assign_split_from_pid(pid: int, train_frac: float) -> str:
     if not (0.0 < train_frac < 1.0):
         raise ValueError('train_frac must be between 0 and 1.')
 
@@ -62,12 +47,11 @@ def _assign_split_from_pid(
         return 'val'
     else:
         return 'test'
-    
+
 
 def collect_split_playlists_streaming(
-    config: MPDConfig
+    config: MPDConfig,
 ) -> tuple[list[dict], list[dict], list[dict]]:
-    
     train_playlists, val_playlists, test_playlists = [], [], []
 
     max_train = config.max_train_playlists
@@ -88,11 +72,9 @@ def collect_split_playlists_streaming(
         if split == 'train':
             if max_train is None or len(train_playlists) < max_train:
                 train_playlists.append(playlist)
-
         elif split == 'val':
             if max_val is None or len(val_playlists) < max_val:
                 val_playlists.append(playlist)
-
         else:
             if max_test is None or len(test_playlists) < max_test:
                 test_playlists.append(playlist)

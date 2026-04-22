@@ -10,10 +10,6 @@ def encode_playlist(
         add_bos: bool = True,
         add_eos: bool = True
 ) -> list[int]:
-    """
-    Turn a playlist into tokens per TrackVocab.
-    """
-
     track_seq = playlist_to_track_sequence(playlist)
     ids = [vocab.encode_token(t) for t in track_seq]
 
@@ -30,23 +26,15 @@ def collect_encoded_playlists(
         vocab: TrackVocab,
         playlists
 ) -> list[list[int]]:
-    """
-    Convert playlists to encoded integer sequences.
-    """
-
     encoded = []
     for playlist in tqdm(playlists):
         raw_len = len(playlist_to_track_sequence(playlist))
         if raw_len < config.min_playlist_len:
             continue
 
-        ids = encode_playlist(
-            playlist,
-            vocab,
-            config.max_seq_len,
-        )
+        ids = encode_playlist(playlist, vocab, config.max_seq_len)
 
-        if len(ids) >= 3: # beginning token, one item, ending token
+        if len(ids) >= 3:  # bos + at least one track + eos
             encoded.append(ids)
 
     return encoded

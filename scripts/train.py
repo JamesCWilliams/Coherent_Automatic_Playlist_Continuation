@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 """
-Pareto-frontier training script.
+Pareto-frontier sweep: nDCG@k vs. sequential coherence.
 
-Sweeps coherence weight lambda across a configurable range. For each value
-trains a fresh model and records both nDCG@k (accuracy) and greedy-prediction
-sequential coherence (quality) on the held-out test set. The joint results
-are written to --output_dir/results.json.
+Trains one model per coherence weight (lambda) and records accuracy and
+coherence quality on the held-out test set. Supports three coherence scoring
+modes: sequential, prefix_mean, and combined.
 
-Gradient norms are logged every epoch so you can inspect how each lambda
-value affects optimization stability.
-
-Usage (quick smoke-test, ~128 playlists):
+Usage:
     python scripts/train.py --max_train_playlists 128 --num_epochs 5
 
-Typical evaluation run (~5k playlists):
-    python scripts/train.py \
-        --max_train_playlists 5000 \
-        --num_epochs 20 \
-        --coherence_weights 0.0 0.01 0.05 0.1 0.2 0.5 1.0
+Coherence ablation:
+    python scripts/train.py \\
+        --max_train_playlists 8000 --num_epochs 20 \\
+        --d_model 256 --n_layers 4 --d_ff 512 \\
+        --coherence_mode prefix_mean \\
+        --coherence_weights 0.0 5.0 10.0
 """
 
 import argparse
@@ -28,9 +25,7 @@ import time
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 
-# Allow running from any directory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from modules.data_loading.mpd.reader import MPDConfig
@@ -42,11 +37,8 @@ from modules.coherence.cooccurence import (
     sequential_coherence_scores_fast,
 )
 from modules.coherence.losses import combined_ce_coherence_loss
+from modules.utilities.logging import log as write_log
 
-
-# ---------------------------------------------------------------------------
-# Reproducibility
-# ---------------------------------------------------------------------------
 
 def seed_everything(seed: int) -> None:
     random.seed(seed)
@@ -55,9 +47,38 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-# ---------------------------------------------------------------------------
-# Metrics
-# ---------------------------------------------------------------------------
+def _prefix_mean_coherence_scores_fast(
+    input_ids: torch.Tensor,
+    similarity_matrix: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    # At position t, returns the mean similarity row over all real tracks
+    # seen in positions 0..t. Special-token positions have all-zero rows
+    # in the similarity matrix so they don't affect the average.
+    all_rows = similarity_matrix[input_ids]                       # (B, T, V)
+    is_real = (all_rows.sum(dim=-1, keepdim=True) > 0).float()   # (B, T, 1)
+    if attention_mask is not None:
+        is_real = is_real * attention_mask.unsqueeze(-1).float()
+    cum_sum   = (all_rows * is_real).cumsum(dim=1)                # (B, T, V)
+    cum_count = is_real.cumsum(dim=1).clamp(min=1)                # (B, T, 1)
+    return cum_sum / cum_count
+
+
+def _get_coherence_scores(
+    input_ids: torch.Tensor,
+    similarity_matrix: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    mode: str,
+    alpha: float,
+) -> torch.Tensor:
+    if mode == 'sequential':
+        return sequential_coherence_scores_fast(input_ids, similarity_matrix, attention_mask)
+    if mode == 'prefix_mean':
+        return _prefix_mean_coherence_scores_fast(input_ids, similarity_matrix, attention_mask)
+    seq   = sequential_coherence_scores_fast(input_ids, similarity_matrix, attention_mask)
+    pmean = _prefix_mean_coherence_scores_fast(input_ids, similarity_matrix, attention_mask)
+    return alpha * seq + (1.0 - alpha) * pmean
+
 
 @torch.no_grad()
 def compute_ndcg_at_k(
@@ -65,30 +86,14 @@ def compute_ndcg_at_k(
     labels: torch.Tensor,
     k_values: list[int],
 ) -> dict[int, float]:
-    """
-    nDCG@k for next-track prediction.
-
-    Because only one item is relevant per position, IDCG = 1/log2(2) = 1,
-    so nDCG@k = 1/log2(rank+1) when rank <= k, else 0.
-
-    Returns a dict mapping each k to the mean nDCG@k over all valid positions
-    in the batch. Accumulate the returned values weighted by n_valid across
-    batches to get the dataset-level mean.
-    """
-    valid_mask = labels != -100                               # (B, T)
+    valid_mask = labels != -100
     n_valid = int(valid_mask.sum().item())
     if n_valid == 0:
         return {k: 0.0 for k in k_values}
 
     labels_clamped = labels.clamp(min=0)
-
-    # Score the true next track at every position
-    true_scores = logits.gather(
-        2, labels_clamped.unsqueeze(-1)
-    ).squeeze(-1)                                             # (B, T)
-
-    # Rank = #tracks scored strictly higher + 1  (tied scores get best rank)
-    ranks = (logits > true_scores.unsqueeze(-1)).sum(dim=-1) + 1  # (B, T)
+    true_scores = logits.gather(2, labels_clamped.unsqueeze(-1)).squeeze(-1)
+    ranks = (logits > true_scores.unsqueeze(-1)).sum(dim=-1) + 1
 
     results: dict[int, float] = {}
     for k in k_values:
@@ -99,7 +104,6 @@ def compute_ndcg_at_k(
             torch.zeros_like(ranks, dtype=torch.float),
         )
         results[k] = dcg.sum().item() / n_valid
-
     return results
 
 
@@ -110,29 +114,16 @@ def compute_eval_coherence(
     labels: torch.Tensor,
     similarity_matrix: torch.Tensor,
 ) -> float:
-    """
-    Mean sequential coherence of the model's greedy predictions.
-
-    At each valid position t, measures similarity(greedy_pred[t], input_ids[t]).
-    A position is valid when labels[t] != -100 (non-padding, non-BOS-target).
-    Special tokens (PAD, BOS, EOS) have zero rows in the similarity matrix so
-    they contribute 0 without requiring explicit filtering.
-    """
-    valid_mask = (labels != -100)
+    # Always sequential regardless of training mode, so the eval metric is
+    # comparable across ablations.
+    valid_mask = labels != -100
     n_valid = int(valid_mask.sum().item())
     if n_valid == 0:
         return 0.0
-
-    preds = logits.argmax(dim=-1)                             # (B, T)
-
-    # similarity_matrix[i, j] = sim(track i, track j)
-    sim = similarity_matrix[input_ids, preds]                 # (B, T)
+    preds = logits.argmax(dim=-1)
+    sim   = similarity_matrix[input_ids, preds]
     return (sim * valid_mask.float()).sum().item() / n_valid
 
-
-# ---------------------------------------------------------------------------
-# One evaluation pass
-# ---------------------------------------------------------------------------
 
 @torch.no_grad()
 def evaluate(
@@ -141,16 +132,18 @@ def evaluate(
     similarity_matrix: torch.Tensor,
     coherence_weight: float,
     coherence_temperature: float,
+    coherence_mode: str,
+    coherence_alpha: float,
     k_values: list[int],
     device: torch.device,
 ) -> dict:
     model.eval()
 
-    ce_sum = 0.0
-    coh_sum = 0.0
-    ndcg_sums = {k: 0.0 for k in k_values}
+    ce_sum       = 0.0
+    coh_sum      = 0.0
+    ndcg_sums    = {k: 0.0 for k in k_values}
     eval_coh_sum = 0.0
-    n_tokens = 0
+    n_tokens     = 0
 
     for batch in loader:
         input_ids      = batch['input_ids'].to(device)
@@ -159,10 +152,8 @@ def evaluate(
 
         logits = model(input_ids, attention_mask)
 
-        coherence_scores = sequential_coherence_scores_fast(
-            input_ids=input_ids,
-            similarity_matrix=similarity_matrix,
-            attention_mask=attention_mask,
+        coherence_scores = _get_coherence_scores(
+            input_ids, similarity_matrix, attention_mask, coherence_mode, coherence_alpha,
         )
 
         loss_dict = combined_ce_coherence_loss(
@@ -175,10 +166,10 @@ def evaluate(
             coherence_temperature=coherence_temperature,
         )
 
-        n_valid = int((labels != -100).sum().item())
-        n_tokens  += n_valid
-        ce_sum    += float(loss_dict['ce_loss'])  * n_valid
-        coh_sum   += float(loss_dict['coherence_loss']) * n_valid
+        n_valid   = int((labels != -100).sum().item())
+        n_tokens += n_valid
+        ce_sum   += float(loss_dict['ce_loss'])        * n_valid
+        coh_sum  += float(loss_dict['coherence_loss']) * n_valid
 
         ndcg = compute_ndcg_at_k(logits, labels, k_values)
         for k in k_values:
@@ -190,16 +181,12 @@ def evaluate(
 
     d = max(n_tokens, 1)
     return {
-        'ce_loss':        ce_sum  / d,
-        'coh_loss':       coh_sum / d,
-        'eval_coherence': eval_coh_sum / d,
+        'ce_loss':        ce_sum        / d,
+        'coh_loss':       coh_sum       / d,
+        'eval_coherence': eval_coh_sum  / d,
         **{f'ndcg_{k}':   ndcg_sums[k] / d for k in k_values},
     }
 
-
-# ---------------------------------------------------------------------------
-# One training epoch
-# ---------------------------------------------------------------------------
 
 def train_epoch(
     model: DecodeOnlyTransformer,
@@ -208,27 +195,27 @@ def train_epoch(
     similarity_matrix: torch.Tensor,
     coherence_weight: float,
     coherence_temperature: float,
+    coherence_mode: str,
+    coherence_alpha: float,
     max_grad_norm: float,
     device: torch.device,
 ) -> dict:
     model.train()
 
-    loss_sum = 0.0
-    ce_sum   = 0.0
-    coh_sum  = 0.0
-    n_tokens = 0
+    loss_sum      = 0.0
+    ce_sum        = 0.0
+    coh_sum       = 0.0
+    n_tokens      = 0
     grad_norm_sum = 0.0
-    n_batches = 0
+    n_batches     = 0
 
     for batch in loader:
         input_ids      = batch['input_ids'].to(device)
         labels         = batch['labels'].to(device)
         attention_mask = batch['attention_mask'].to(device)
 
-        coherence_scores = sequential_coherence_scores_fast(
-            input_ids=input_ids,
-            similarity_matrix=similarity_matrix,
-            attention_mask=attention_mask,
+        coherence_scores = _get_coherence_scores(
+            input_ids, similarity_matrix, attention_mask, coherence_mode, coherence_alpha,
         )
 
         optimizer.zero_grad()
@@ -246,9 +233,8 @@ def train_epoch(
 
         loss_dict['loss'].backward()
 
-        # Record pre-clip gradient norm — this is the stability signal the
-        # reviewers asked about: at high lambda the coherence gradient can
-        # dwarf the CE gradient and destabilize training.
+        # Log pre-clip norm to track how much the coherence gradient competes
+        # with CE as lambda grows.
         pre_clip_norm = 0.0
         for p in model.parameters():
             if p.grad is not None:
@@ -274,10 +260,6 @@ def train_epoch(
     }
 
 
-# ---------------------------------------------------------------------------
-# Full run for one lambda value
-# ---------------------------------------------------------------------------
-
 def run_single(
     coherence_weight: float,
     train_loader,
@@ -288,6 +270,7 @@ def run_single(
     args: argparse.Namespace,
     device: torch.device,
     output_dir: Path,
+    log_dir: Path,
 ) -> dict:
     seed_everything(args.seed)
     model     = DecodeOnlyTransformer(model_config).to(device)
@@ -295,11 +278,21 @@ def run_single(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
 
-    k_values       = args.k_values
-    primary_k      = max(k_values)
-    best_val_ndcg  = -1.0
-    ckpt_path      = output_dir / f'ckpt_lambda_{coherence_weight:.4f}.pt'
+    k_values      = args.k_values
+    primary_k     = max(k_values)
+    best_val_ndcg = -1.0
+    ckpt_path     = output_dir / f'ckpt_{args.coherence_mode}_lambda_{coherence_weight:.4f}.pt'
     epoch_logs: list[dict] = []
+
+    eval_kwargs = dict(
+        similarity_matrix=similarity_matrix,
+        coherence_weight=coherence_weight,
+        coherence_temperature=args.coherence_temperature,
+        coherence_mode=args.coherence_mode,
+        coherence_alpha=args.coherence_alpha,
+        k_values=k_values,
+        device=device,
+    )
 
     for epoch in range(1, args.num_epochs + 1):
         t0 = time.time()
@@ -311,19 +304,13 @@ def run_single(
             similarity_matrix=similarity_matrix,
             coherence_weight=coherence_weight,
             coherence_temperature=args.coherence_temperature,
+            coherence_mode=args.coherence_mode,
+            coherence_alpha=args.coherence_alpha,
             max_grad_norm=args.max_grad_norm,
             device=device,
         )
 
-        val_m = evaluate(
-            model=model,
-            loader=val_loader,
-            similarity_matrix=similarity_matrix,
-            coherence_weight=coherence_weight,
-            coherence_temperature=args.coherence_temperature,
-            k_values=k_values,
-            device=device,
-        )
+        val_m = evaluate(model=model, loader=val_loader, **eval_kwargs)
 
         epoch_log = {
             'epoch':           epoch,
@@ -342,7 +329,8 @@ def run_single(
             torch.save(model.state_dict(), ckpt_path)
 
         print(
-            f'  λ={coherence_weight:.3f} | ep {epoch:02d}/{args.num_epochs}'
+            f'  lambda={coherence_weight:.3f} [{args.coherence_mode}]'
+            f' | ep {epoch:02d}/{args.num_epochs}'
             f' | train_ce={train_m["ce_loss"]:.4f}'
             f' | train_coh={train_m["coh_loss"]:.5f}'
             f' | grad_norm={train_m["grad_norm"]:.3f}'
@@ -350,33 +338,15 @@ def run_single(
             f' | val_coh={val_m["eval_coherence"]:.4f}'
         )
 
-    # Evaluate the final epoch model on test while it's still in memory.
-    # This is the Pareto-relevant result: it shows where each lambda actually
-    # lands after full training, not just the accuracy-maximizing checkpoint.
-    final_test_m = evaluate(
-        model=model,
-        loader=test_loader,
-        similarity_matrix=similarity_matrix,
-        coherence_weight=coherence_weight,
-        coherence_temperature=args.coherence_temperature,
-        k_values=k_values,
-        device=device,
-    )
+    final_test_m = evaluate(model=model, loader=test_loader, **eval_kwargs)
 
-    # Also evaluate the best-val-nDCG checkpoint for completeness.
     model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
-    best_test_m = evaluate(
-        model=model,
-        loader=test_loader,
-        similarity_matrix=similarity_matrix,
-        coherence_weight=coherence_weight,
-        coherence_temperature=args.coherence_temperature,
-        k_values=k_values,
-        device=device,
-    )
+    best_test_m = evaluate(model=model, loader=test_loader, **eval_kwargs)
 
-    return {
+    run_result = {
         'coherence_weight': coherence_weight,
+        'coherence_mode':   args.coherence_mode,
+        'coherence_alpha':  args.coherence_alpha,
         'epochs':           epoch_logs,
         'best_val_ndcg':    best_val_ndcg,
         'test_best':        {f'test_{k}': v for k, v in best_test_m.items()},
@@ -384,58 +354,54 @@ def run_single(
         'checkpoint':       str(ckpt_path),
     }
 
+    write_log(run_result, subdir_name=output_dir.name, log_dir=log_dir)
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+    return run_result
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description='Pareto frontier sweep: nDCG@k vs. sequential coherence'
     )
 
-    # Data
-    p.add_argument('--data_dir',             type=Path,  default=None,
-                   help='Path to MPD data/ directory (auto-detected if omitted)')
-    p.add_argument('--max_train_playlists',  type=int,   default=5000)
-    p.add_argument('--min_track_freq',       type=int,   default=3,
-                   help='Minimum playlist appearances to keep a track in vocab')
-    p.add_argument('--max_seq_len',          type=int,   default=64)
-    p.add_argument('--batch_size',           type=int,   default=64)
-    p.add_argument('--num_workers',          type=int,   default=0)
+    p.add_argument('--data_dir',            type=Path, default=None)
+    p.add_argument('--max_train_playlists', type=int,  default=5000)
+    p.add_argument('--min_track_freq',      type=int,  default=3)
+    p.add_argument('--max_seq_len',         type=int,  default=64)
+    p.add_argument('--batch_size',          type=int,  default=64)
+    p.add_argument('--num_workers',         type=int,  default=0)
 
-    # Model
-    p.add_argument('--d_model',   type=int,   default=128)
-    p.add_argument('--n_heads',   type=int,   default=4)
-    p.add_argument('--n_layers',  type=int,   default=2)
-    p.add_argument('--d_ff',      type=int,   default=256)
-    p.add_argument('--dropout',   type=float, default=0.1)
+    p.add_argument('--d_model',  type=int,   default=128)
+    p.add_argument('--n_heads',  type=int,   default=4)
+    p.add_argument('--n_layers', type=int,   default=2)
+    p.add_argument('--d_ff',     type=int,   default=256)
+    p.add_argument('--dropout',  type=float, default=0.1)
 
-    # Training
     p.add_argument('--num_epochs',    type=int,   default=20)
     p.add_argument('--lr',            type=float, default=3e-4)
     p.add_argument('--weight_decay',  type=float, default=1e-2)
-    p.add_argument('--max_grad_norm', type=float, default=1.0,
-                   help='Pre-clip gradient norm; also logged raw for stability analysis')
+    p.add_argument('--max_grad_norm', type=float, default=1.0)
     p.add_argument('--seed',          type=int,   default=42)
 
-    # Coherence sweep
     p.add_argument(
         '--coherence_weights', type=float, nargs='+',
         default=[0.0, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0],
-        help='Lambda values to sweep. 0.0 is the pure CE baseline.',
     )
     p.add_argument('--coherence_temperature', type=float, default=1.0)
+    p.add_argument(
+        '--coherence_mode', type=str, default='sequential',
+        choices=['sequential', 'prefix_mean', 'combined'],
+    )
+    p.add_argument('--coherence_alpha', type=float, default=0.7)
 
-    # Evaluation
     p.add_argument('--k_values', type=int, nargs='+', default=[1, 5, 10, 20])
 
-    # Output
     p.add_argument(
         '--output_dir', type=Path,
         default=Path('saved_models') / 'pareto_sweep',
     )
-    p.add_argument('--device', type=str, default=None)
+    p.add_argument('--log_dir', type=Path, default=None)
+    p.add_argument('--device',  type=str,  default=None)
 
     return p.parse_args()
 
@@ -447,19 +413,18 @@ def main() -> None:
     device = torch.device(
         args.device or ('cuda' if torch.cuda.is_available() else 'cpu')
     )
-    print(f'Device: {device}')
+    print(f'device: {device}')
 
-    # Resolve data directory relative to project root
     project_root = Path(__file__).resolve().parent.parent
     data_dir = args.data_dir or (project_root / 'datasets' / 'MPD' / 'data')
     if not data_dir.exists():
         print(f'ERROR: data directory not found: {data_dir}', file=sys.stderr)
         sys.exit(1)
 
+    log_dir = args.log_dir or (project_root / 'logs')
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------ data
-    print('\n=== Loading data ===')
+    print('\nloading data...')
     mpd_config = MPDConfig(
         data_dir=data_dir,
         min_track_freq=args.min_track_freq,
@@ -475,20 +440,18 @@ def main() -> None:
 
     vocab_size = len(vocab)
     matrix_mb  = vocab_size ** 2 * 4 / 1024 ** 2
-    print(f'\nVocab size: {vocab_size:,}  |  similarity matrix: ~{matrix_mb:.0f} MB')
+    print(f'vocab size: {vocab_size:,}  |  similarity matrix: ~{matrix_mb:.0f} MB')
     if matrix_mb > 4096:
         print(
-            'WARNING: estimated similarity matrix exceeds 4 GB. '
-            'Raise --min_track_freq or lower --max_train_playlists to reduce it.',
+            'WARNING: similarity matrix exceeds 4 GB. '
+            'Raise --min_track_freq or lower --max_train_playlists.',
             file=sys.stderr,
         )
 
-    # ------------------------------------------------------------------ coherence
-    print('\n=== Building co-occurrence store & similarity matrix ===')
+    print('\nbuilding co-occurrence store...')
     store             = build_cooccurrence_store(sequences=train_sequences, vocab=vocab)
     similarity_matrix = build_dense_similarity_matrix(store=store, device=device)
 
-    # ------------------------------------------------------------------ model
     model_config = ModelConfig(
         num_tracks=vocab_size,
         d_model=args.d_model,
@@ -501,15 +464,14 @@ def main() -> None:
         tie_weights=True,
     )
     n_params = sum(p.numel() for p in DecodeOnlyTransformer(model_config).parameters())
-    print(f'Model parameters: {n_params:,}')
+    print(f'model parameters: {n_params:,}')
 
-    # ------------------------------------------------------------------ sweep
-    print(f'\n=== Sweeping {len(args.coherence_weights)} lambda values ===')
-    print(f'λ: {args.coherence_weights}\n')
+    print(f'\nsweeping {len(args.coherence_weights)} lambda values (mode: {args.coherence_mode})')
+    print(f'lambdas: {args.coherence_weights}\n')
 
     all_runs: list[dict] = []
     for lam in args.coherence_weights:
-        print(f'\n--- λ = {lam} ---')
+        print(f'\nlambda={lam}  mode={args.coherence_mode}')
         run = run_single(
             coherence_weight=lam,
             train_loader=train_loader,
@@ -520,65 +482,66 @@ def main() -> None:
             args=args,
             device=device,
             output_dir=args.output_dir,
+            log_dir=log_dir,
         )
         all_runs.append(run)
 
-    # ------------------------------------------------------------------ save
     results = {
         'config': {
-            'max_train_playlists':  args.max_train_playlists,
-            'min_track_freq':       args.min_track_freq,
-            'max_seq_len':          args.max_seq_len,
-            'vocab_size':           vocab_size,
-            'd_model':              args.d_model,
-            'n_heads':              args.n_heads,
-            'n_layers':             args.n_layers,
-            'd_ff':                 args.d_ff,
-            'dropout':              args.dropout,
-            'num_epochs':           args.num_epochs,
-            'lr':                   args.lr,
-            'weight_decay':         args.weight_decay,
-            'max_grad_norm':        args.max_grad_norm,
+            'max_train_playlists':   args.max_train_playlists,
+            'min_track_freq':        args.min_track_freq,
+            'max_seq_len':           args.max_seq_len,
+            'vocab_size':            vocab_size,
+            'd_model':               args.d_model,
+            'n_heads':               args.n_heads,
+            'n_layers':              args.n_layers,
+            'd_ff':                  args.d_ff,
+            'dropout':               args.dropout,
+            'num_epochs':            args.num_epochs,
+            'lr':                    args.lr,
+            'weight_decay':          args.weight_decay,
+            'max_grad_norm':         args.max_grad_norm,
             'coherence_temperature': args.coherence_temperature,
-            'seed':                 args.seed,
-            'k_values':             args.k_values,
-            'coherence_weights':    args.coherence_weights,
+            'coherence_mode':        args.coherence_mode,
+            'coherence_alpha':       args.coherence_alpha,
+            'seed':                  args.seed,
+            'k_values':              args.k_values,
+            'coherence_weights':     args.coherence_weights,
         },
         'runs': all_runs,
     }
     results_path = args.output_dir / 'results.json'
     with open(results_path, 'w') as f:
         json.dump(results, f, indent=2)
-    print(f'\nResults saved → {results_path}')
+    print(f'\nresults saved -> {results_path}')
 
-    # ------------------------------------------------------------------ summary
-    total_elapsed = sum(
-        e['elapsed_s'] for run in all_runs for e in run['epochs']
-    )
+    total_elapsed = sum(e['elapsed_s'] for run in all_runs for e in run['epochs'])
     minutes, seconds = divmod(int(total_elapsed), 60)
-    print(f'\nTotal training time: {minutes}m {seconds}s')
+    print(f'total training time: {minutes}m {seconds}s')
 
     primary_k = max(args.k_values)
-    col = f'nDCG@{primary_k}'
-    header = f'{"lambda":>8}  {col:>10}  {"coherence":>10}  {"CE loss":>10}  {"grad_norm_p50":>14}'
+    col    = f'nDCG@{primary_k}'
+    header = (f'{"lambda":>8}  {col:>10}  {"coherence":>10}'
+              f'  {"CE loss":>10}  {"grad_norm_p50":>14}')
     sep = '-' * len(header)
 
     def _row(run: dict, key: str) -> str:
-        lam  = run['coherence_weight']
-        ndcg = run[key].get(f'test_ndcg_{primary_k}', float('nan'))
-        coh  = run[key].get('test_eval_coherence', float('nan'))
-        ce   = run[key].get('test_ce_loss', float('nan'))
-        grad_norms = [e['train_grad_norm'] for e in run['epochs']]
-        med_gn = sorted(grad_norms)[len(grad_norms) // 2]
-        return f'{lam:>8.3f}  {ndcg:>10.4f}  {coh:>10.4f}  {ce:>10.4f}  {med_gn:>14.3f}'
+        lam    = run['coherence_weight']
+        ndcg   = run[key].get(f'test_ndcg_{primary_k}', float('nan'))
+        coh    = run[key].get('test_eval_coherence',    float('nan'))
+        ce     = run[key].get('test_ce_loss',           float('nan'))
+        norms  = [e['train_grad_norm'] for e in run['epochs']]
+        med_gn = sorted(norms)[len(norms) // 2]
+        return (f'{lam:>8.3f}  {ndcg:>10.4f}  {coh:>10.4f}'
+                f'  {ce:>10.4f}  {med_gn:>14.3f}')
 
-    print('\n=== Pareto Frontier — final epoch (tradeoff at convergence) ===')
+    print(f'\npareto frontier (final epoch):')
     print(header)
     print(sep)
     for run in all_runs:
         print(_row(run, 'test_final'))
 
-    print(f'\n=== Pareto Frontier — best val nDCG@{primary_k} checkpoint (accuracy-optimised) ===')
+    print(f'\npareto frontier (best val nDCG@{primary_k} checkpoint):')
     print(header)
     print(sep)
     for run in all_runs:
