@@ -43,18 +43,18 @@ def analyze_ndcg_ratios(runs: list[dict], k_values: list[int]) -> None:
         print('WARNING: no lambda=0 baseline; skipping delta computation.')
         base_scores = {k: 0.0 for k in k_values}
     else:
-        base_scores = {k: baseline['test_final'].get(f'test_ndcg_{k}', float('nan'))
+        base_scores = {k: baseline['mean']['test_final'].get(f'test_ndcg_{k}', float('nan'))
                        for k in k_values}
 
     k_hdr = '  '.join(f'nDCG@{k:2d}' for k in k_values)
     d_hdr = '  '.join(f' D@{k:2d} ' for k in k_values)
-    width  = 10 + len(k_values) * 10 + 6 + len(k_values) * 8
+    width = 10 + len(k_values) * 10 + 6 + len(k_values) * 8
     print(f'\n{"lambda":>8}  {k_hdr}  ||  {d_hdr}')
     print('-' * width)
 
     for run in runs:
-        lam  = run['coherence_weight']
-        vals = {k: run['test_final'].get(f'test_ndcg_{k}', float('nan')) for k in k_values}
+        lam = run['coherence_weight']
+        vals = {k: run['mean']['test_final'].get(f'test_ndcg_{k}', float('nan')) for k in k_values}
         deltas = {k: vals[k] - base_scores[k] for k in k_values}
         s_str = '  '.join(f'{vals[k]:>8.4f}' for k in k_values)
         d_str = '  '.join(f'{deltas[k]:>+6.4f}' for k in k_values)
@@ -65,10 +65,10 @@ def analyze_ndcg_ratios(runs: list[dict], k_values: list[int]) -> None:
     for run in runs:
         if run['coherence_weight'] == 0.0:
             continue
-        lam    = run['coherence_weight']
-        deltas = [run['test_final'].get(f'test_ndcg_{k}', float('nan')) - base_scores[k]
+        lam = run['coherence_weight']
+        deltas = [run['mean']['test_final'].get(f'test_ndcg_{k}', float('nan')) - base_scores[k]
                   for k in k_values]
-        slope  = (deltas[-1] - deltas[0]) / max(k_values[-1] - k_values[0], 1)
+        slope = (deltas[-1] - deltas[0]) / max(k_values[-1] - k_values[0], 1)
         k0, k1 = k_values[0], k_values[-1]
         print(f'  lambda={lam:5.1f}: D@{k0}={deltas[0]:+.4f} -> D@{k1}={deltas[-1]:+.4f}'
               f'  (slope {slope:+.6f}/rank)')
@@ -85,14 +85,14 @@ def collect_predictions(
     n_total = 0
 
     for batch in loader:
-        input_ids      = batch['input_ids'].to(device)
-        labels         = batch['labels'].to(device)
+        input_ids = batch['input_ids'].to(device)
+        labels = batch['labels'].to(device)
         attention_mask = batch['attention_mask'].to(device)
 
         logits = model(input_ids, attention_mask)
-        preds  = logits.argmax(dim=-1)
+        preds = logits.argmax(dim=-1)
 
-        valid_mask  = labels != -100
+        valid_mask = labels != -100
         valid_preds = preds[valid_mask].cpu().tolist()
         pred_counter.update(valid_preds)
         n_total += len(valid_preds)
@@ -102,35 +102,35 @@ def collect_predictions(
 
 def diversity_metrics(counter: Counter, n_positions: int, vocab_size: int) -> dict:
     unique_tracks = len(counter)
-    coverage_pct  = unique_tracks / vocab_size * 100
+    coverage_pct = unique_tracks / vocab_size * 100
 
     entropy = 0.0
     for cnt in counter.values():
         p = cnt / n_positions
         entropy -= p * math.log(p)
-    max_entropy  = math.log(vocab_size)
+    max_entropy = math.log(vocab_size)
     norm_entropy = entropy / max_entropy if max_entropy > 0 else 0.0
 
     sorted_counts = sorted(counter.values(), reverse=True)
-    top10_pct  = sum(sorted_counts[:10])  / n_positions * 100
+    top10_pct = sum(sorted_counts[:10])  / n_positions * 100
     top100_pct = sum(sorted_counts[:100]) / n_positions * 100
 
     n = len(sorted_counts)
     cumsum, gini_sum = 0, 0
     for c in sorted(sorted_counts):
-        cumsum   += c
+        cumsum += c
         gini_sum += cumsum
     gini = 1.0 - 2.0 * gini_sum / max(n * n_positions, 1)
 
     return {
         'unique_tracks': unique_tracks,
-        'coverage_pct':  coverage_pct,
-        'entropy_nats':  entropy,
-        'norm_entropy':  norm_entropy,
-        'top10_pct':     top10_pct,
-        'top100_pct':    top100_pct,
-        'gini':          gini,
-        'n_positions':   n_positions,
+        'coverage_pct': coverage_pct,
+        'entropy_nats': entropy,
+        'norm_entropy': norm_entropy,
+        'top10_pct': top10_pct,
+        'top100_pct': top100_pct,
+        'gini': gini,
+        'n_positions': n_positions,
     }
 
 
@@ -170,16 +170,17 @@ def analyze_diversity(
     )
 
     target_lambdas = set(lambdas) if lambdas else None
-    selected_runs  = [r for r in runs
+    selected_runs = [r for r in runs
                       if target_lambdas is None or r['coherence_weight'] in target_lambdas]
 
     counters: dict[float, Counter] = {}
-    metrics:  dict[float, dict]   = {}
+    metrics: dict[float, dict]   = {}
 
     for run in selected_runs:
-        lam      = run['coherence_weight']
-        ckpt_rel = run.get('checkpoint', '')
-        ckpt     = (project_root / ckpt_rel
+        lam = run['coherence_weight']
+        seed_runs = run.get('seed_runs', [])
+        ckpt_rel = seed_runs[0].get('checkpoint', '') if seed_runs else ''
+        ckpt = (project_root / ckpt_rel
                     if not Path(ckpt_rel).is_absolute() else Path(ckpt_rel))
 
         if not ckpt.exists():
@@ -191,8 +192,8 @@ def analyze_diversity(
         model.load_state_dict(torch.load(ckpt, map_location=device, weights_only=True))
 
         counter, n_pos = collect_predictions(model, test_loader, device)
-        counters[lam]  = counter
-        metrics[lam]   = diversity_metrics(counter, n_pos, vocab_size)
+        counters[lam] = counter
+        metrics[lam] = diversity_metrics(counter, n_pos, vocab_size)
         del model
 
     if not metrics:
@@ -216,11 +217,11 @@ def analyze_diversity(
     try:
         from scipy.stats import spearmanr
         all_tracks = sorted({t for c in counters.values() for t in c})
-        tf_vec     = [train_freq.get(t, 0) for t in all_tracks]
+        tf_vec = [train_freq.get(t, 0) for t in all_tracks]
         for lam in sorted(counters):
-            pf_vec    = [counters[lam].get(t, 0) for t in all_tracks]
+            pf_vec = [counters[lam].get(t, 0) for t in all_tracks]
             rho, pval = spearmanr(tf_vec, pf_vec)
-            n_unique  = metrics[lam]['unique_tracks']
+            n_unique = metrics[lam]['unique_tracks']
             print(f'  lambda={lam:5.1f}:  rho={rho:.4f}  (p={pval:.2e})'
                   f'  [{n_unique:,} unique predicted tracks]')
     except ImportError:
@@ -240,7 +241,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    args   = parse_args()
+    args = parse_args()
     device = torch.device(
         args.device or ('cuda' if torch.cuda.is_available() else 'cpu')
     )
@@ -256,8 +257,8 @@ def main() -> None:
     with open(results_path, encoding='utf-8') as f:
         data = json.load(f)
 
-    config   = data['config']
-    runs     = data['runs']
+    config = data['config']
+    runs = data['runs']
     k_values = config.get('k_values', [1, 5, 10, 20])
 
     print(f'\nresults: {results_path}')

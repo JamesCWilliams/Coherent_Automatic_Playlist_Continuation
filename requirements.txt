@@ -4,3 +4,4 @@ pandas
 tqdm
 ipywidgets
 scipy
+matplotlib
